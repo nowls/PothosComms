@@ -8,6 +8,7 @@
 #include <iostream>
 #include <algorithm> //min/max
 #include <chrono>
+#include <limits>
 
 /***********************************************************************
  * |PothosDoc Signal Probe
@@ -20,11 +21,15 @@
  *
  * The calculation for value can be, the last seen value,
  * the RMS (root mean square) over the last buffer,
- * or the mean (average value) over the last buffer.
+ * the mean (average value) over the last buffer,
+ * the minimum magnitude over the last buffer,
+ * the maximum magnitude over the last buffer,
+ * the P2RMS (peak-to-RMS ratio) over the last buffer,
+ * or the SINAD (signal to noise-and-distortion ratio) over the last buffer.
  *
  * |category /Utility
  * |category /Event
- * |keywords rms average mean
+ * |keywords rms average mean min minimum max maximum papr snr sinad
  * |alias /blocks/stream_probe
  *
  * |param dtype[Data Type] The data type consumed by the stream probe.
@@ -36,10 +41,16 @@
  * In value mode, this block expects to be fed by an upstream block
  * that produces a stream of slow-changing values.
  * Otherwise the value will appear random.
+ * Note that the SINAD mode is most useful when the input contains samples from
+ * an FFT block with its size equal to the signal probe window length.
  * |default "VALUE"
  * |option [Value] "VALUE"
  * |option [RMS] "RMS"
  * |option [Mean] "MEAN"
+ * |option [Min] "MIN"
+ * |option [Max] "MAX"
+ * |option [P2RMS] "P2RMS"
+ * |option [SINAD] "SINAD"
  *
  * |param rate How many calculations per second?
  * The probe will perform a calculation at most this many times per second.
@@ -139,18 +150,7 @@ public:
         }
 
         if (_mode == "VALUE") _value = Pothos::Util::fromQ<ProbeType>(x[N-1], 0);
-        else if (_mode == "RMS")
-        {
-            double accumulator = 0.0;
-            ProbeType x_n;
-            for (size_t n = 0; n < N; n++)
-            {
-                x_n = Pothos::Util::fromQ<ProbeType>(x[n], 0);
-                const double v = std::abs(x_n);
-                accumulator += v*v;
-            }
-            _value = std::sqrt(accumulator/N);
-        }
+        else if (_mode == "RMS") _value = computeRMS(x, N);
         else if (_mode == "MEAN")
         {
             ProbeType mean = 0;
@@ -158,11 +158,73 @@ public:
             mean /= N;
             _value = mean;
         }
+        else if (_mode == "MIN")
+        {
+            double minimum = std::numeric_limits<double>::max();
+            ProbeType x_n;
+            for (size_t n = 0; n < N; n++)
+            {
+                x_n = Pothos::Util::fromQ<ProbeType>(x[n], 0);
+                const double v = std::abs(x_n);
+                if (v < minimum) minimum = v;
+            }
+            _value = minimum;
+        }
+        else if (_mode == "MAX") _value = computeMaxMag(x, N);
+        else if (_mode == "P2RMS") _value = computeMaxMag(x, N) / computeRMS(x, N);
+        else if (_mode == "SINAD")
+        {
+            size_t index = computeMaxMagIndex(x, N);
+            if (index == 0) index++;
+            else if (index == N - 1) index--;
+            double rms = std::abs(computeRMS(x, N));
+            double rms_sig = std::abs(computeRMS(&x[index - 1], 3));
+
+            double rss_nd = std::sqrt(double(N)*rms*rms - 3.0*rms_sig*rms_sig);
+            _value = rms_sig / rss_nd;
+        }
 
         this->emitSignal("valueChanged", _value);
     }
 
 private:
+    ProbeType computeRMS(const Type *x, const size_t N)
+    {
+        double accumulator = 0.0;
+        ProbeType x_n;
+        for (size_t n = 0; n < N; n++)
+        {
+            x_n = Pothos::Util::fromQ<ProbeType>(x[n], 0);
+            const double v = std::abs(x_n);
+            accumulator += v*v;
+        }
+        return std::sqrt(accumulator/N);
+    }
+
+    size_t computeMaxMagIndex(const Type *x, const size_t N)
+    {
+        double maximum = std::numeric_limits<double>::lowest();
+        size_t index = 0;
+        ProbeType x_n;
+        for (size_t n = 0; n < N; n++)
+        {
+            x_n = Pothos::Util::fromQ<ProbeType>(x[n], 0);
+            const double v = std::abs(x_n);
+            if (v > maximum)
+            {
+                index = n;
+                maximum = v;
+            }
+        }
+        return index;
+    }
+
+    ProbeType computeMaxMag(const Type *x, const size_t N)
+    {
+        const size_t index = computeMaxMagIndex(x, N);
+        return std::abs(Pothos::Util::fromQ<ProbeType>(x[index], 0));
+    }
+
     ProbeType _value;
     std::string _mode;
     size_t _window;
